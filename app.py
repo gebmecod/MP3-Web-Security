@@ -3,33 +3,41 @@ import sqlite3
 
 from flask import Flask, request, render_template, redirect
 
+from markupsafe import escape
+
+from itsdangerous import URLSafeSerializer
 
 app = Flask(__name__)
+
 con = sqlite3.connect("app.db", check_same_thread=False)
 
+serializer = URLSafeSerializer(secrets.token_hex(32))
+
+# Route for login
 @app.route("/login", methods=["GET", "POST"])
 def login():
     cur = con.cursor()
     if request.method == "GET":
-        if request.cookies.get("session_token"):
-            res = cur.execute("SELECT username FROM users INNER JOIN sessions ON "
-                              + "users.id = sessions.user WHERE sessions.token = '"
-                              + request.cookies.get("session_token") + "'")
-            user = res.fetchone()
-            if user:
-                return redirect("/home")
-
+        session_token = request.cookies.get("session_token")
+        if session_token:
+            try:
+                user_id = serializer.loads(session_token)
+                res = cur.execute("SELECT username FROM users WHERE id = ?", (user_id,))
+                user = res.fetchone()
+                if user:
+                    return redirect("/home")
+            except Exception as e:
+                print("Error:", e)
         return render_template("login.html")
     else:
-        res = cur.execute("SELECT id from users WHERE username = '"
-                    + request.form["username"]
-                    + "' AND password = '"
-                    + request.form["password"] + "'")
+        username = request.form["username"]
+        password = request.form["password"]
+        res = cur.execute("SELECT id FROM users WHERE username = ? AND password = ?", (username, password))
         user = res.fetchone()
         if user:
-            token = secrets.token_hex()
-            cur.execute("INSERT INTO sessions (user, token) VALUES ("
-                        + str(user[0]) + ", '" + token + "');")
+            user_id = user[0]
+            token = serializer.dumps(user_id)
+            cur.execute("INSERT INTO sessions (user, token) VALUES (?, ?)", (user_id, token))
             con.commit()
             response = redirect("/home")
             response.set_cookie("session_token", token)
@@ -37,53 +45,49 @@ def login():
         else:
             return render_template("login.html", error="Invalid username and/or password!")
 
-@app.route("/")
 @app.route("/home")
 def home():
     cur = con.cursor()
-    if request.cookies.get("session_token"):
-        res = cur.execute("SELECT users.id, username FROM users INNER JOIN sessions ON "
-                          + "users.id = sessions.user WHERE sessions.token = '"
-                          + request.cookies.get("session_token") + "';")
-        user = res.fetchone()
-        if user:
-            res = cur.execute("SELECT message FROM posts WHERE user = " + str(user[0]) + ";")
-            posts = res.fetchall()
-            return render_template("home.html", username=user[1], posts=posts)
-
+    session_token = request.cookies.get("session_token")
+    if session_token:
+        try:
+            user_id = serializer.loads(session_token)
+            res = cur.execute("SELECT username FROM users WHERE id = ?", (user_id,))
+            user = res.fetchone()
+            if user:
+                res = cur.execute("SELECT message FROM posts WHERE user = ?", (user_id,))
+                posts = res.fetchall()
+                return render_template("home.html", username=user[0], posts=posts)
+        except Exception as e:
+            print("Error:", e)
     return redirect("/login")
-
 
 @app.route("/posts", methods=["POST"])
 def posts():
     cur = con.cursor()
-    if request.cookies.get("session_token"):
-        res = cur.execute("SELECT users.id, username FROM users INNER JOIN sessions ON "
-                          + "users.id = sessions.user WHERE sessions.token = '"
-                          + request.cookies.get("session_token") + "';")
-        user = res.fetchone()
-        if user:
-            cur.execute("INSERT INTO posts (message, user) VALUES ('"
-                        + request.form["message"] + "', " + str(user[0]) + ");")
+    session_token = request.cookies.get("session_token")
+    if session_token:
+        try:
+            user_id = serializer.loads(session_token)
+            message = escape(request.form["message"])
+            cur.execute("INSERT INTO posts (message, user) VALUES (?, ?)", (message, user_id))
             con.commit()
             return redirect("/home")
+        except Exception as e:
+            print("Error:", e)
+    return redirect("/login")
 
-    return redirect("/login", error="test")
-
-
-@app.route("/logout", methods=["GET"])
+@app.route("/logout")
 def logout():
-    cur = con.cursor()
-    if request.cookies.get("session_token"):
-        res = cur.execute("SELECT users.id, username FROM users INNER JOIN sessions ON "
-                          + "users.id = sessions.user WHERE sessions.token = '"
-                          + request.cookies.get("session_token") + "'")
-        user = res.fetchone()
-        if user:
-            cur.execute("DELETE FROM sessions WHERE user = " + str(user[0]) + ";")
+    session_token = request.cookies.get("session_token")
+    if session_token:
+        try:
+            user_id = serializer.loads(session_token)
+            cur = con.cursor()
+            cur.execute("DELETE FROM sessions WHERE user = ?", (user_id,))
             con.commit()
-
+        except Exception as e:
+            print("Error:", e)
     response = redirect("/login")
     response.set_cookie("session_token", "", expires=0)
-
     return response
